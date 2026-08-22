@@ -16,6 +16,7 @@ from sentence_transformers import SentenceTransformer
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics import silhouette_score
 from sklearn.metrics.pairwise import cosine_similarity
 
 SEED = 42
@@ -241,6 +242,21 @@ def semantic_search(query, df, embeddings, model, top_k=5, min_score=None) -> pd
     )
 
 
+def evaluate_k_range(embeddings, k_min=2, k_max=10) -> pd.DataFrame:
+    """k를 바꿔가며 실루엣 점수를 계산한다.
+
+    실루엣은 -1~1이며 클수록 군집 내부가 조밀하고 군집 간에는 떨어져 있다는 뜻이다.
+    문장 임베딩에서는 0.03~0.10 정도가 흔하므로, 절대값이 아니라 k끼리의
+    상대 비교로만 읽어야 한다.
+    """
+    k_max = min(k_max, len(embeddings) - 1)
+    rows = []
+    for k in range(k_min, k_max + 1):
+        labels = KMeans(n_clusters=k, random_state=SEED, n_init="auto").fit_predict(embeddings)
+        rows.append({"k": k, "silhouette": round(float(silhouette_score(embeddings, labels)), 4)})
+    return pd.DataFrame(rows)
+
+
 def build_analysis(file_path, n_clusters=7, model=None) -> dict:
     """CSV → 정제 → 임베딩 → 클러스터링 → 키워드 → 대표의견 → 토픽맵까지 한 번에."""
     if model is None:
@@ -333,6 +349,37 @@ def render_results(state):
     st.plotly_chart(state["topic_map"], use_container_width=True)
 
 
+def render_k_advisor(state):
+    st.subheader("적정 주제 수(k) 진단")
+    st.caption(
+        "k를 2~10으로 바꿔가며 실루엣 점수를 계산합니다. "
+        "지금 분석에 쓴 임베딩을 재사용하므로 다시 인코딩하지 않습니다."
+    )
+
+    if st.button("k = 2~10 비교하기"):
+        with st.spinner("k별로 클러스터링을 다시 계산하는 중…"):
+            st.session_state["k_scores"] = evaluate_k_range(state["embeddings"])
+
+    scores = st.session_state.get("k_scores")
+    if scores is None:
+        return
+
+    best_k = int(scores.loc[scores["silhouette"].idxmax(), "k"])
+    col_table, col_chart = st.columns([1, 2])
+    col_table.dataframe(scores, use_container_width=True, hide_index=True)
+    col_chart.line_chart(scores.set_index("k"), y="silhouette")
+
+    st.info(
+        f"실루엣이 가장 높은 값은 **k = {best_k}** 입니다. "
+        f"현재 분석에 사용한 값은 k = {state['n_clusters']} 입니다."
+    )
+    st.caption(
+        "실루엣은 군집이 기하학적으로 얼마나 잘 갈렸는지만 봅니다. 작은 k일수록 "
+        "높게 나오는 경향이 있어, 점수가 가장 높은 k가 해석하기 가장 좋은 k라는 뜻은 "
+        "아닙니다. 최종 판단은 Topic Summary의 키워드와 대표 의견을 읽고 하세요."
+    )
+
+
 def render_search(state):
     st.subheader("Semantic Search")
     col_q, col_k, col_t = st.columns([4, 1, 1])
@@ -381,6 +428,8 @@ def main():
                     st.session_state["analysis"] = build_analysis(
                         uploaded, n_clusters=n_clusters, model=load_model()
                     )
+                # 새 분석이므로 이전 k 진단 결과는 버린다.
+                st.session_state.pop("k_scores", None)
             except ValueError as exc:
                 st.error(str(exc))
 
@@ -390,6 +439,8 @@ def main():
         return
 
     render_results(state)
+    st.divider()
+    render_k_advisor(state)
     st.divider()
     render_search(state)
 
